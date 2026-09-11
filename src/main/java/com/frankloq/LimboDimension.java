@@ -1,33 +1,31 @@
 package com.frankloq;
 
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.TeleportTarget;
-import net.minecraft.world.World;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 
 public class LimboDimension {
 
-    public static final RegistryKey<World> LIMBO_KEY = RegistryKey.of(
-            RegistryKeys.WORLD,
-            Identifier.of(HardcoreWorldReset.MOD_ID, "limbo")
+    public static final ResourceKey<Level> LIMBO_KEY = ResourceKey.create(
+            Registries.DIMENSION,
+            Identifier.fromNamespaceAndPath(HardcoreWorldReset.MOD_ID, "limbo")
     );
 
     // Teleports the players to the Limbo dimension
     // Returns true if successful, false if the dimension was not found.
-    public static boolean teleportToLimbo(ServerPlayerEntity player) {
-        MinecraftServer server = player.getServer();
+    public static boolean teleportToLimbo(ServerPlayer player) {
+        MinecraftServer server = player.level().getServer();
 
         if (server == null) {
             HardcoreWorldReset.LOGGER.error("Server is null when trying to teleport to Limbo.");
             return false;
         }
 
-        ServerWorld limboWorld = server.getWorld(LIMBO_KEY);
+        ServerLevel limboWorld = server.getLevel(LIMBO_KEY);
 
         if (limboWorld == null) {
             HardcoreWorldReset.LOGGER.error(
@@ -37,32 +35,18 @@ public class LimboDimension {
 
             // Log all registered worlds to help debug
             HardcoreWorldReset.LOGGER.error("Registered worlds:");
-            for (RegistryKey<World> key : server.getWorldRegistryKeys()) {
-                HardcoreWorldReset.LOGGER.error("  - {}", key.getValue());
+            for (ResourceKey<Level> key : server.levelKeys()) {
+                HardcoreWorldReset.LOGGER.error("  - {}", key.identifier());
             }
 
             return false;
         }
 
         // We use now 1.21 native teleportation instead of FabricDimensions
-        player.teleportTo(new net.minecraft.world.TeleportTarget(
-                limboWorld,
-                new net.minecraft.util.math.Vec3d(0, 65, 0),
-                net.minecraft.util.math.Vec3d.ZERO,
-                0.0f,
-                0.0f,
-                entity -> {
-                    // I kinda liked the sound effect of traveling to the Nether of FabricDimensions so lets add it manually here
-                    if (entity instanceof ServerPlayerEntity p) {
-                        p.playSoundToPlayer(
-                                net.minecraft.sound.SoundEvents.BLOCK_PORTAL_TRAVEL,
-                                net.minecraft.sound.SoundCategory.MASTER,
-                                0.5f,
-                                1.0f
-                        );
-                    }
-                }
-        ));
+        if (player.teleport(new net.minecraft.world.level.portal.TeleportTransition(
+                limboWorld, new net.minecraft.world.phys.Vec3(0, 65, 0),
+                net.minecraft.world.phys.Vec3.ZERO, 0.0f, 0.0f,
+                net.minecraft.world.level.portal.TeleportTransition.PLAY_PORTAL_SOUND)) == null) return false;
 
         HardcoreWorldReset.LOGGER.info(
                 "Teleported {} to Limbo.",

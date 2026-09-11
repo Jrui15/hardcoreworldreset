@@ -1,461 +1,164 @@
 package com.frankloq.reset;
 
 import com.frankloq.HardcoreWorldReset;
-import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtIo;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
+import com.frankloq.LimboDimension;
+import com.frankloq.mixin.MinecraftServerAccessor;
+import com.frankloq.mixin.ServerLevelAccessor;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.world.ChunkTicketType;
-import net.minecraft.server.world.ServerChunkManager;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.text.Text;
-import net.minecraft.util.Unit;
-import net.minecraft.util.WorldSavePath;
-import net.minecraft.util.math.ChunkPos;
-import net.minecraft.world.World;
-import net.minecraft.world.gen.chunk.NoiseChunkGenerator;
-import net.minecraft.world.gen.noise.NoiseConfig;
-
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.levelgen.WorldGenSettings;
+import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.level.storage.LevelResource;
+import net.minecraft.world.level.storage.ServerLevelData;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
-import java.util.Random;
-import java.util.stream.Stream;
+import java.util.LinkedHashMap;
+import java.util.OptionalLong;
 
 public class WorldResetManager {
-
-    private static final int PHASE_DELAY_TICKS = 40;
-
     private static ResetPhase currentPhase = ResetPhase.IDLE;
-    private static int phaseTimer = 0;
-    private static long newSeed = 0;
-    private static boolean countdownLocked = false;
-
+    private static int phaseTimer;
+    private static boolean countdownLocked;
     private static int currentTry = 1;
-    private static boolean hasLoadedTryCount = false;
+    private static boolean hasLoadedTryCount;
 
-    public static boolean isResetting() {
-        return currentPhase != ResetPhase.IDLE;
-    }
-
+    public static boolean isResetting() { return currentPhase != ResetPhase.IDLE; }
     public static boolean tryLockCountdown() {
-        if (countdownLocked || currentPhase != ResetPhase.IDLE) return false;
+        if (countdownLocked || isResetting()) return false;
         countdownLocked = true;
         return true;
     }
-
-    public static void unlockCountdown() {
+    public static void unlockCountdown() { countdownLocked = false; }
+    public static void resetSession() {
+        currentPhase = ResetPhase.IDLE;
         countdownLocked = false;
+        phaseTimer = 0;
+        currentTry = 1;
+        hasLoadedTryCount = false;
     }
-
-    // Indestructible try counter system
     public static int getCurrentTry(MinecraftServer server) {
-        if (!hasLoadedTryCount) loadTryCount(server);
-        return currentTry;
-    }
-
-    private static void loadTryCount(MinecraftServer server) {
-        try {
-            Path stateFile = getWorldFolder(server).resolve("hardcore_state.txt");
-            if (Files.exists(stateFile)) {
-                currentTry = Integer.parseInt(Files.readString(stateFile).trim());
-            } else {
+        if (!hasLoadedTryCount) {
+            Path file = server.getWorldPath(LevelResource.ROOT).resolve("hardcore_state.txt");
+            try {
+                currentTry = Files.exists(file) ? Integer.parseInt(Files.readString(file).trim()) : 1;
+            } catch (IOException | NumberFormatException e) {
+                HardcoreWorldReset.LOGGER.warn("Unable to load attempt counter", e);
                 currentTry = 1;
             }
-        } catch (Exception e) {
-            currentTry = 1;
+            hasLoadedTryCount = true;
         }
-        hasLoadedTryCount = true;
+        return currentTry;
     }
-
-    public static void incrementAndSaveTryCount(MinecraftServer server) {
-        if (!hasLoadedTryCount) loadTryCount(server);
-        currentTry++;
-        try {
-            Path stateFile = getWorldFolder(server).resolve("hardcore_state.txt");
-            Files.writeString(stateFile, String.valueOf(currentTry));
-        } catch (Exception e) {
-            HardcoreWorldReset.LOGGER.error("Failed to save Try Counter!", e);
-        }
-    }
-
-    public static void tick(MinecraftServer server) {
-        if (currentPhase == ResetPhase.IDLE) return;
-        if (phaseTimer > 0) {
-            phaseTimer--;
-            return;
-        }
-
-        switch (currentPhase) {
-            case UNLOADING -> executeUnloadPhase(server);
-            case DELETING -> executeDeletionPhase(server);
-            case REGENERATING -> executeRegenerationPhase(server);
-            case DONE -> executeDonePhase(server);
-            default -> {
-            }
-        }
-    }
-
     public static void beginReset(MinecraftServer server) {
-        if (currentPhase != ResetPhase.IDLE) return;
-
-        Long fixedSeed = getFixedSeed(server);
-        if (fixedSeed != null) {
-            newSeed = fixedSeed;
-            HardcoreWorldReset.LOGGER.info("Using seed from server.properties: {}", newSeed);
-        } else {
-            newSeed = new Random().nextLong();
-        }
-
-        // Ensure we load the try count into memory before the reset starts
-        if (!hasLoadedTryCount) loadTryCount(server);
-
-        HardcoreWorldReset.LOGGER.info("Starting true world reset. New seed: {}", newSeed);
-        server.getPlayerManager().broadcast(Text.literal("§5[Reset] §7Beginning world erasure..."), false);
-
-        // Teleport everyone to Limbo before the unloading phase starts
-        for (net.minecraft.server.network.ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-            com.frankloq.LimboDimension.teleportToLimbo(player);
-        }
-
-        advanceTo(ResetPhase.UNLOADING);
+        if (isResetting()) return;
+        getCurrentTry(server);
+        currentPhase = ResetPhase.UNLOADING;
+        phaseTimer = 40;
+        server.getPlayerList().broadcastSystemMessage(Component.literal("§5[Reset] §7Beginning world erasure..."), false);
     }
-
-    // Had to do all of this as well for 1.21 compatibility
-    private static void executeUnloadPhase(MinecraftServer server) {
-        HardcoreWorldReset.LOGGER.info("Phase: UNLOADING");
-        server.getPlayerManager().broadcast(Text.literal("§5[Reset] §7Unloading memory cache..."), false);
-
-        // Get rid of entities
-        for (RegistryKey<World> key : WorldUnloader.RESET_DIMENSIONS) {
-            ServerWorld world = server.getWorld(key);
-            if (world != null) {
-                WorldInjectionUtils.clearAllEntities(world);
-
-                // Wipes blockEntityTickers and pendingBlockEntityTickers
-                try {
-                    for (java.lang.reflect.Field field : net.minecraft.world.World.class.getDeclaredFields()) {
-                        if (java.util.List.class.isAssignableFrom(field.getType())) {
-                            field.setAccessible(true);
-                            java.util.List<?> list = (java.util.List<?>) field.get(world);
-                            if (list != null) {
-                                list.clear();
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    HardcoreWorldReset.LOGGER.error("Failed to vaporize ghost block entities!", e);
-                }
-            }
-        }
-
-        // Revoke the permanent spawn chunks memory lock
-        ServerWorld overworld = server.getWorld(World.OVERWORLD);
-        if (overworld != null) {
-            overworld.getChunkManager().removeTicket(
-                    ChunkTicketType.START, new ChunkPos(overworld.getSpawnPos()), 11, Unit.INSTANCE
-            );
-        }
-
-        // Force save to pack the chunks securely to disk
-        server.saveAll(true, true, true);
-
-        // Advance to the deleting phase after 40 ticks
-        // This wait perfectly ensures no dropped items are ticking when we wipe the ram
-        advanceTo(ResetPhase.DELETING);
-    }
-
-    private static void executeDeletionPhase(MinecraftServer server) {
-        HardcoreWorldReset.LOGGER.info("Phase: DELETING");
-        server.getPlayerManager().broadcast(Text.literal("§5[Reset] §7Erasing old world files..."), false);
-
-        for (RegistryKey<World> key : WorldUnloader.RESET_DIMENSIONS) {
-            ServerWorld world = server.getWorld(key);
-            if (world != null) {
-                // Now we clear the main RAM and it doesn't crash because entities are dead
-                WorldInjectionUtils.lobotomizeChunkManager(world);
-
-                // Clear the io buffer too
-                WorldInjectionUtils.lobotomizeStorageIO(world);
-
-                // Rip the file handles away from OS
-                WorldInjectionUtils.forceCloseRegionFiles(world);
-            }
-        }
-
-        Path worldFolder = getWorldFolder(server);
-        if (worldFolder != null) {
-            for (RegistryKey<World> key : WorldUnloader.RESET_DIMENSIONS) {
-                Path dimPath;
-                if (key == World.OVERWORLD) dimPath = worldFolder;
-                else if (key == World.NETHER) dimPath = worldFolder.resolve("DIM-1");
-                else if (key == World.END) dimPath = worldFolder.resolve("DIM1");
-                else
-                    dimPath = worldFolder.resolve("dimensions").resolve(key.getValue().getNamespace()).resolve(key.getValue().getPath());
-
-                deleteFolder(dimPath.resolve("region"));
-                deleteFolder(dimPath.resolve("poi"));
-                deleteFolder(dimPath.resolve("entities"));
-            }
-
-            HardcoreWorldReset.LOGGER.info("Wiping player data, stats, and advancements...");
-            deleteFolder(worldFolder.resolve("advancements"));
-            deleteFolder(worldFolder.resolve("stats"));
-            deleteFolder(worldFolder.resolve("playerdata"));
-
+    public static void tick(MinecraftServer server) {
+        if (!isResetting() || phaseTimer-- > 0) return;
+        if (currentPhase == ResetPhase.UNLOADING) {
+            // Replace every level at END_SERVER_TICK, before the next tick or save.
             try {
-                java.nio.file.Files.createDirectories(worldFolder.resolve("advancements"));
-                java.nio.file.Files.createDirectories(worldFolder.resolve("stats"));
-                java.nio.file.Files.createDirectories(worldFolder.resolve("playerdata"));
-            } catch (java.io.IOException e) {
-                HardcoreWorldReset.LOGGER.error("Failed to recreate player folders.", e);
+                rebuildWorlds(server);
+                currentPhase = ResetPhase.DONE;
+                phaseTimer = 40;
+            } catch (Exception e) {
+                HardcoreWorldReset.LOGGER.error("World reset failed; stopping the server", e);
+                server.halt(false);
             }
-        }
-
-        advanceTo(ResetPhase.REGENERATING);
-    }
-
-    private static void executeRegenerationPhase(MinecraftServer server) {
-        HardcoreWorldReset.LOGGER.info("Phase: REGENERATING");
-
-        // Physically save the new try count to the text file
-        incrementAndSaveTryCount(server);
-
-        server.getPlayerManager().broadcast(Text.literal("§5[Reset] §7Applying new seed: §e" + newSeed), false);
-        writeNewSeedToLevelDat(server, newSeed, false);
-
-        for (RegistryKey<World> key : WorldUnloader.RESET_DIMENSIONS) {
-            ServerWorld world = server.getWorld(key);
-            if (world == null) continue;
-
-            ServerChunkManager manager = world.getChunkManager();
-            net.minecraft.world.gen.chunk.ChunkGenerator chunkGen = manager.getChunkGenerator();
-
-            if (chunkGen instanceof NoiseChunkGenerator noiseGen) {
-                NoiseConfig newConfig = NoiseConfig.create(
-                        noiseGen.getSettings().value(),
-                        server.getRegistryManager().getWrapperOrThrow(RegistryKeys.NOISE_PARAMETERS),
-                        newSeed
-                );
-
-                injectByType(manager, NoiseConfig.class, newConfig);
-                injectByType(manager.chunkLoadingManager, NoiseConfig.class, newConfig);
-
-                try {
-                    net.minecraft.world.gen.chunk.placement.StructurePlacementCalculator newCalculator =
-                            chunkGen.createStructurePlacementCalculator(
-                                    server.getRegistryManager().getWrapperOrThrow(RegistryKeys.STRUCTURE_SET),
-                                    newConfig, newSeed
-                            );
-                    injectByType(manager.chunkLoadingManager, net.minecraft.world.gen.chunk.placement.StructurePlacementCalculator.class, newCalculator);
-                } catch (Exception e) {
-                }
-            }
-
-            WorldInjectionUtils.injectSeedIntoMemory(world, newSeed);
-
-            if (key.equals(World.OVERWORLD)) {
-                world.setTimeOfDay(0L);
-                // Temporary dummy spawn to prevent crashes
-                world.setSpawnPos(new net.minecraft.util.math.BlockPos(0, 200, 0), 0.0f);
-            }
-
-            if (key.equals(World.END)) {
-                WorldInjectionUtils.resetEnderDragonFight(world);
-            }
-        }
-
-        advanceTo(ResetPhase.DONE);
-    }
-
-    private static void executeDonePhase(MinecraftServer server) {
-        HardcoreWorldReset.LOGGER.info("Phase: DONE");
-
-        // We advance to IDLE immediately outside the execute block so the tick loop doesn't fire this multiple times
-        advanceTo(ResetPhase.IDLE);
-
-        server.execute(() -> {
-            ServerWorld overworld = server.getWorld(World.OVERWORLD);
-            if (overworld != null) {
-                // Calculate the new spawn
-                net.minecraft.util.math.BlockPos newSpawn;
-
-                // Protective try-catch block for rapid restarts
-                try {
-                    // We pump the chunk task queue first to clear out ghost tickets from the previous deletion
-                    for (int i = 0; i < 5; i++) {
-                        overworld.getChunkManager().tick(() -> true, true);
-                    }
-
-                    // Attempt the natural spawn
-                    newSpawn = com.frankloq.reset.WorldSpawnLocator.determineWorldSpawn(overworld);
-
-                    overworld.getChunk(newSpawn.getX() >> 4, newSpawn.getZ() >> 4, net.minecraft.world.chunk.ChunkStatus.FULL, true);
-
-                } catch (IllegalStateException e) {
-                    HardcoreWorldReset.LOGGER.warn("Chunk engine overloaded by rapid restarts. Catching crash and falling back to 0,0.");
-
-                    // We safely fallback to 0, 0 because the REGENERATING phase already added a ticket here,
-                    // meaning it is guaranteed to be fully loaded and won't crash
-                    int fallbackY = overworld.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, 0, 0);
-                    if (fallbackY <= overworld.getBottomY()) fallbackY = 64; // Anti-void protection
-
-                    newSpawn = new net.minecraft.util.math.BlockPos(0, fallbackY, 0);
-                }
-
-                // Set the actual world spawn to the spawn we just calculated
-                overworld.setSpawnPos(newSpawn, 0.0f);
-
-                // Add ticket to load chunks around 0,0 safely
-                int spawnRadius = server.getGameRules().getInt(net.minecraft.world.GameRules.SPAWN_CHUNK_RADIUS);
-                overworld.getChunkManager().addTicket(
-                        net.minecraft.server.world.ChunkTicketType.START,
-                        new net.minecraft.util.math.ChunkPos(newSpawn),
-                        spawnRadius,
-                        net.minecraft.util.Unit.INSTANCE
-                );
-
-                // Safely teleport players directly to the natural spawn
-                for (net.minecraft.server.network.ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-                    if (player.getServerWorld().getRegistryKey() == com.frankloq.LimboDimension.LIMBO_KEY) {
-
-                        // Force wipe their RAM cache
-                        com.frankloq.reset.WorldInjectionUtils.wipePlayerState(player);
-
-                        // Teleport the player
-                        player.teleport(
-                                overworld,
-                                newSpawn.getX() + 0.5,
-                                newSpawn.getY() + 1.0,
-                                newSpawn.getZ() + 0.5,
-                                0.0f,
-                                0.0f
-                        );
-                    }
-                }
-            }
-
-            // I'm trying to optimize ram usage but idk if it's gonna do something
-            for (RegistryKey<World> key : WorldUnloader.RESET_DIMENSIONS) {
-                if (key.equals(World.OVERWORLD)) continue;
-
-                ServerWorld world = server.getWorld(key);
-                if (world != null) {
-                    ServerChunkManager manager = world.getChunkManager();
-                    for (int i = 0; i < 50; i++) {
-                        manager.tick(() -> false, true);
-                    }
-                }
-            }
-
-            System.gc();
-
-            server.getPlayerManager().broadcast(Text.literal("§a[Reset] §7World reset complete! Respawning players..."), false);
+        } else if (currentPhase == ResetPhase.DONE) {
             HardcoreWorldReset.onResetComplete(server);
-
+            server.saveEverything(true, true, true);
+            currentPhase = ResetPhase.IDLE;
             countdownLocked = false;
-        });
+        }
     }
-
-    private static <T> void injectByType(Object target, Class<T> fieldType, T value) {
-        Class<?> clazz = target.getClass();
-        while (clazz != null && clazz != Object.class) {
-            for (Field field : clazz.getDeclaredFields()) {
-                if (fieldType.isAssignableFrom(field.getType())) {
-                    try {
-                        field.setAccessible(true);
-                        field.set(target, value);
-                    } catch (Exception ignored) {
-                    }
-                }
+    private static void rebuildWorlds(MinecraftServer server) throws IOException {
+        for (var player : server.getPlayerList().getPlayers()) {
+            if (!player.level().dimension().equals(LimboDimension.LIMBO_KEY)) {
+                throw new IllegalStateException("All players must be in limbo before resetting");
             }
-            clazz = clazz.getSuperclass();
         }
-    }
-
-    public static void guaranteeLevelDatOnShutdown(MinecraftServer server) {
-        if (newSeed != 0) {
-            writeNewSeedToLevelDat(server, newSeed, true);
+        MinecraftServerAccessor access = (MinecraftServerAccessor) server;
+        var oldLevels = new LinkedHashMap<ResourceKey<Level>, ServerLevel>();
+        for (var key : WorldUnloader.RESET_DIMENSIONS) {
+            ServerLevel level = server.getLevel(key);
+            if (level != null) oldLevels.put(key, level);
         }
+        if (!oldLevels.containsKey(Level.OVERWORLD)) throw new IllegalStateException("Missing overworld");
+        Path root = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        for (var key : oldLevels.keySet()) {
+            Path dimension = access.hwr$storage().getDimensionPath(key);
+            for (String folder : new String[]{"region", "entities", "poi", "data"}) validatePath(root, dimension.resolve(folder));
+        }
+        server.saveEverything(true, true, true);
+        for (var level : oldLevels.values()) level.close();
+        for (var key : oldLevels.keySet()) {
+            Path dimension = access.hwr$storage().getDimensionPath(key);
+            for (String folder : new String[]{"region", "entities", "poi", "data"}) deleteFolder(root, dimension.resolve(folder));
+        }
+        for (var resource : new LevelResource[]{LevelResource.PLAYER_ADVANCEMENTS_DIR,
+                LevelResource.PLAYER_STATS_DIR, LevelResource.PLAYER_DATA_DIR}) {
+            Path path = server.getWorldPath(resource);
+            deleteFolder(root, path);
+            Files.createDirectories(path);
+        }
+        WorldGenSettings previous = server.getWorldGenSettings();
+        long seed = HardcoreWorldReset.reuseSeed ? previous.options().seed() : new java.util.Random().nextLong();
+        WorldGenSettings settings = new WorldGenSettings(previous.options().withSeed(OptionalLong.of(seed)), previous.dimensions());
+        access.hwr$setWorldGenSettings(settings);
+        server.getDataStorage().set(WorldGenSettings.TYPE, settings);
+        settings.setDirty();
+        for (var entry : oldLevels.entrySet()) {
+            var key = entry.getKey();
+            ServerLevel old = entry.getValue();
+            LevelStem stem = settings.dimensions().get(ResourceKey.create(Registries.LEVEL_STEM, key.identifier())).orElseThrow();
+            ServerLevel fresh = new ServerLevel(server, access.hwr$executor(), access.hwr$storage(),
+                    (ServerLevelData) old.getLevelData(), key, stem, server.getWorldData().isDebugWorld(),
+                    BiomeManager.obfuscateSeed(seed), ((ServerLevelAccessor) old).hwr$customSpawners(), key.equals(Level.OVERWORLD));
+            access.hwr$levels().put(key, fresh);
+            server.getPlayerList().addWorldborderListener(fresh);
+        }
+        ServerLevel overworld = server.overworld();
+        BlockPos spawn = WorldSpawnLocator.determineWorldSpawn(overworld);
+        server.setRespawnData(LevelData.RespawnData.of(Level.OVERWORLD, spawn, 0.0f, 0.0f));
+        server.registryAccess().lookupOrThrow(Registries.WORLD_CLOCK).listElements()
+                .forEach(clock -> server.clockManager().setTotalTicks(clock, 0L));
+        overworld.resetWeatherCycle();
+        currentTry++;
+        Files.writeString(root.resolve("hardcore_state.txt"), Integer.toString(currentTry));
+        server.saveEverything(true, true, true);
+        HardcoreWorldReset.LOGGER.info("Recreated vanilla dimensions with seed {} (attempt {})", seed, currentTry);
     }
-
-    private static boolean writeNewSeedToLevelDat(MinecraftServer server, long seed, boolean isShutdown) {
-        try {
-            Path rootPath = server.getSavePath(WorldSavePath.ROOT).normalize();
-            Path levelDatPath = rootPath.resolve("level.dat");
-
-            if (!Files.exists(levelDatPath)) return false;
-
-            NbtCompound root = NbtIo.readCompressed(levelDatPath, net.minecraft.nbt.NbtSizeTracker.ofUnlimitedBytes());
-            NbtCompound data = root.getCompound("Data");
-
-            if (data.contains("RandomSeed")) data.putLong("RandomSeed", seed);
-            if (data.contains("WorldGenSettings")) {
-                NbtCompound wgs = data.getCompound("WorldGenSettings");
-                wgs.putLong("seed", seed);
-                data.put("WorldGenSettings", wgs);
+    private static void validatePath(Path root, Path path) throws IOException {
+        Path absolute = path.toAbsolutePath().normalize();
+        if (absolute.equals(root) || !absolute.startsWith(root)) throw new IOException("Invalid reset path: " + path);
+        for (Path part = absolute; part != null && !part.equals(root); part = part.getParent()) {
+            if (Files.isSymbolicLink(part) || (Files.exists(part) && !part.toRealPath().startsWith(root.toRealPath()))) {
+                throw new IOException("Reset path escapes the world directory: " + path);
             }
-
-            data.putLong("Time", 0L);
-            data.putLong("DayTime", 0L);
-            if (data.contains("DragonFight")) data.remove("DragonFight");
-
-            root.put("Data", data);
-            Files.copy(levelDatPath, rootPath.resolve("level.dat_old"), StandardCopyOption.REPLACE_EXISTING);
-            NbtIo.writeCompressed(root, levelDatPath);
-            return true;
-        } catch (IOException e) {
-            return false;
         }
     }
-
-    private static Path getWorldFolder(MinecraftServer server) {
-        try {
-            return server.getSavePath(WorldSavePath.ROOT).normalize();
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private static void deleteFolder(Path path) {
-        if (!Files.exists(path)) return;
-        try (Stream<Path> walk = Files.walk(path)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.delete(p);
-                } catch (IOException e) {
-                    HardcoreWorldReset.LOGGER.error("windows won't fucking allow this file to removed bc is a lil child: " + p.getFileName(), e);
-                }
-            });
-        } catch (IOException e) {
-            HardcoreWorldReset.LOGGER.error("Failed to read folder: " + path, e);
-        }
-    }
-
-    private static void advanceTo(ResetPhase phase) {
-        currentPhase = phase;
-        phaseTimer = PHASE_DELAY_TICKS;
-    }
-
-    private static Long getFixedSeed(MinecraftServer server) {
-        if (!com.frankloq.HardcoreWorldReset.reuseSeed) {
-            return null;
-        }
-
-        try {
-            ServerWorld overworld = server.getWorld(World.OVERWORLD);
-            if (overworld != null) {
-                long currentSeed = overworld.getSeed();
-                return currentSeed;
+    private static void deleteFolder(Path root, Path path) throws IOException {
+        validatePath(root, path);
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return;
+        try (var walk = Files.walk(path)) {
+            for (Path entry : walk.sorted(Comparator.reverseOrder()).toList()) {
+                validatePath(root, entry);
+                Files.delete(entry);
             }
-        } catch (Exception e) {
-            HardcoreWorldReset.LOGGER.error("Failed to fetch current world seed", e);
         }
-
-        return null;
     }
 }

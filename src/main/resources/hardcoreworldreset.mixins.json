@@ -2,11 +2,14 @@
 	"required": true,
 	"minVersion": "0.8",
 	"package": "com.frankloq.mixin",
-	"compatibilityLevel": "JAVA_16",
+	"compatibilityLevel": "JAVA_25",
 	"mixins": [
 		"PlayerDeathMixin",
 		"PlayerLoginMixin",
-		"RegistryBypassMixin"
+		"RegistryBypassMixin",
+		"MinecraftServerAccessor",
+		"ServerLevelAccessor",
+		"PlayerAccessor"
 	],
 	"client": [],
 	"injectors": {

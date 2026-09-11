@@ -1,20 +1,19 @@
 package com.frankloq.reset;
 
 import com.frankloq.HardcoreWorldReset;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.world.World;
-import net.minecraft.registry.RegistryKey;
-
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 import java.util.List;
 
 public class WorldUnloader {
 
     // The three dimensions we want to reset.
-    public static final List<RegistryKey<World>> RESET_DIMENSIONS = List.of(
-            World.OVERWORLD,
-            World.NETHER,
-            World.END
+    public static final List<ResourceKey<Level>> RESET_DIMENSIONS = List.of(
+            Level.OVERWORLD,
+            Level.NETHER,
+            Level.END
     );
 
     // Saves all chunks in all three target worlds and
@@ -24,20 +23,20 @@ public class WorldUnloader {
     public static void saveAndUnloadWorlds(MinecraftServer server) {
         HardcoreWorldReset.LOGGER.info("Beginning world save and unload...");
 
-        for (RegistryKey<World> key : RESET_DIMENSIONS) {
-            ServerWorld world = server.getWorld(key);
+        for (ResourceKey<Level> key : RESET_DIMENSIONS) {
+            ServerLevel world = server.getLevel(key);
 
             if (world == null) {
                 HardcoreWorldReset.LOGGER.warn(
                         "World {} was null during unload, skipping.",
-                        key.getValue()
+                        key.identifier()
                 );
                 continue;
             }
 
             HardcoreWorldReset.LOGGER.info(
                     "Saving world: {}",
-                    key.getValue()
+                    key.identifier()
             );
 
             try {
@@ -49,13 +48,13 @@ public class WorldUnloader {
 
                 HardcoreWorldReset.LOGGER.info(
                         "Successfully saved world: {}",
-                        key.getValue()
+                        key.identifier()
                 );
 
             } catch (Exception e) {
                 HardcoreWorldReset.LOGGER.error(
                         "Failed to save world {}: {}",
-                        key.getValue(),
+                        key.identifier(),
                         e.getMessage()
                 );
             }

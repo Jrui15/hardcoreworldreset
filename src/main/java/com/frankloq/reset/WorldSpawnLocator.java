@@ -1,15 +1,15 @@
 package com.frankloq.reset;
 
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.Heightmap;
-import net.minecraft.world.chunk.ChunkStatus;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.levelgen.Heightmap;
 
 public class WorldSpawnLocator {
 
-    public static BlockPos determineWorldSpawn(ServerWorld world) {
+    public static BlockPos determineWorldSpawn(ServerLevel world) {
         BlockPos bestPos = null;
 
         for (int r = 0; r <= 384; r += 16) {
@@ -33,9 +33,9 @@ public class WorldSpawnLocator {
 
         // Fallback if the entire 2048 radius is somehow ocean
         if (bestPos == null) {
-            world.getChunkManager().getChunk(0, 0, ChunkStatus.FULL, true);
-            int y = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, 0, 0);
-            if (y <= world.getBottomY()) {
+            world.getChunkSource().getChunk(0, 0, ChunkStatus.FULL, true);
+            int y = world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
+            if (y <= world.getMinY()) {
                 y = 63;
             }
 
@@ -47,9 +47,9 @@ public class WorldSpawnLocator {
     return bestPos;
 }
 
-    public static BlockPos checkAndGetSafePos(ServerWorld world, int x, int z) {
+    public static BlockPos checkAndGetSafePos(ServerLevel world, int x, int z) {
         // We load the chunk at the target X, Z to scan it safely
-        world.getChunkManager().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, true);
+        world.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, true);
 
         // Calculate the starting coordinates of the chunk
         int chunkStartX = (x >> 4) << 4;
@@ -62,10 +62,10 @@ public class WorldSpawnLocator {
                 int checkX = chunkStartX + dx;
                 int checkZ = chunkStartZ + dz;
 
-        int y = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+        int y = world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, checkX, checkZ);
 
                 // Anti-void protection
-                if (y <= world.getBottomY()) {
+                if (y <= world.getMinY()) {
                     continue;
                 }
 
@@ -81,13 +81,13 @@ public class WorldSpawnLocator {
     }
 
     // Definitive fix for the player spawning crawling or in dangerous blocks
-    private static boolean isValidSpawnBlock(ServerWorld world, BlockPos pos) {
-        BlockState under = world.getBlockState(pos.down());
+    private static boolean isValidSpawnBlock(ServerLevel world, BlockPos pos) {
+        BlockState under = world.getBlockState(pos.below());
         BlockState feet = world.getBlockState(pos);
-        BlockState head = world.getBlockState(pos.up());
+        BlockState head = world.getBlockState(pos.above());
 
         // The floor must be a solid block and not water or lava
-        if (!under.isSolidBlock(world, pos.down()) || !world.getFluidState(pos.down()).isEmpty()) {
+        if (!under.isRedstoneConductor(world, pos.below()) || !world.getFluidState(pos.below()).isEmpty()) {
             return false;
         }
 
@@ -97,12 +97,12 @@ public class WorldSpawnLocator {
         }
 
         // No dangerous blocks allowed. Reject powder snow, magma and cactus
-        if (under.isOf(Blocks.POWDER_SNOW) || feet.isOf(Blocks.POWDER_SNOW) || head.isOf(Blocks.POWDER_SNOW)) return false;
-        if (under.isOf(Blocks.MAGMA_BLOCK) || under.isOf(Blocks.CACTUS) || under.isOf(Blocks.CAMPFIRE)) return false;
+        if (under.is(Blocks.POWDER_SNOW) || feet.is(Blocks.POWDER_SNOW) || head.is(Blocks.POWDER_SNOW)) return false;
+        if (under.is(Blocks.MAGMA_BLOCK) || under.is(Blocks.CACTUS) || under.is(Blocks.CAMPFIRE)) return false;
 
         // The crawling prevention, the collision shape for the feet and head must be completely empty
         if (!feet.getCollisionShape(world, pos).isEmpty()) return false;
-        if (!head.getCollisionShape(world, pos.up()).isEmpty()) return false;
+        if (!head.getCollisionShape(world, pos.above()).isEmpty()) return false;
 
         return true;
     }
