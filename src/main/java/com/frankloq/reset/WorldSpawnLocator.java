@@ -12,7 +12,8 @@ public class WorldSpawnLocator {
     public static BlockPos determineWorldSpawn(ServerLevel world) {
         BlockPos bestPos = null;
 
-        for (int r = 0; r <= 384; r += 16) {
+        // Bound synchronous chunk generation so ocean seeds cannot stall the server watchdog.
+        for (int r = 0; r <= 32; r += 16) {
 
             // Calculate how many points we need to check to form a perfect circle at this radius
             int points = (r == 0) ? 1 : (int) ((2 * Math.PI * r) / 16);
@@ -31,21 +32,18 @@ public class WorldSpawnLocator {
             if (bestPos != null) break;
         }
 
-        // Fallback if the entire 2048 radius is somehow ocean
-        if (bestPos == null) {
-            world.getChunkSource().getChunk(0, 0, ChunkStatus.FULL, true);
-            int y = world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
-            if (y <= world.getMinY()) {
-                y = 63;
-            }
-
-            BlockPos fallbackPos = new BlockPos(0, Math.max(y, 63), 0);
-
-        return fallbackPos;
+        return bestPos != null ? bestPos : createFallback(world, 0, 0);
     }
 
-    return bestPos;
-}
+    public static BlockPos createFallback(ServerLevel world, int x, int z) {
+        int y = Math.min(world.getMaxY() - 2,
+                Math.max(world.getMinY() + 2, world.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z)));
+        BlockPos pos = new BlockPos(x, y, z);
+        world.setBlockAndUpdate(pos.below(), Blocks.STONE.defaultBlockState());
+        world.setBlockAndUpdate(pos, Blocks.AIR.defaultBlockState());
+        world.setBlockAndUpdate(pos.above(), Blocks.AIR.defaultBlockState());
+        return pos;
+    }
 
     public static BlockPos checkAndGetSafePos(ServerLevel world, int x, int z) {
         // We load the chunk at the target X, Z to scan it safely
@@ -92,7 +90,7 @@ public class WorldSpawnLocator {
         }
 
         // Paranoid check to ensure the block the player is standing in is definitely not a fluid
-        if (!world.getFluidState(pos).isEmpty()) {
+        if (!world.getFluidState(pos).isEmpty() || !world.getFluidState(pos.above()).isEmpty()) {
             return false;
         }
 

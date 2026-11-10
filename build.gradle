@@ -63,3 +63,32 @@ publishing {
 		}
 	}
 }
+
+// Full destructive lifecycle checks are confined to a fresh disposable test world.
+if (project.hasProperty('gameTests')) {
+    loom.runs {
+        resetIntegration {
+            server()
+            source sourceSets.gametest
+            runDir 'build/run/resetIntegration'
+            vmArg '-Dhwr.integration=true'
+        }
+    }
+    tasks.named('runResetIntegration') {
+        doFirst {
+            if (project.findProperty('acceptMinecraftEula') != 'true') {
+                throw new GradleException('Pass -PacceptMinecraftEula=true after accepting the Minecraft EULA')
+            }
+            def directory = layout.buildDirectory.dir('run/resetIntegration').get().asFile
+            delete directory
+            directory.mkdirs()
+            new File(directory, 'eula.txt').text = 'eula=true\n'
+            new File(directory, 'server.properties').text = 'online-mode=false\nserver-ip=127.0.0.1\nserver-port=25576\nview-distance=2\nsimulation-distance=2\n'
+        }
+        doLast {
+            if (!layout.buildDirectory.file('run/resetIntegration/hwr-integration-passed').get().asFile.exists()) {
+                throw new GradleException('Reset integration suite did not complete successfully; inspect the server log')
+            }
+        }
+    }
+}
