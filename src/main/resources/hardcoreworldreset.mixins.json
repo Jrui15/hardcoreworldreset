@@ -6,7 +6,8 @@
 	"mixins": [
 		"PlayerDeathMixin",
 		"PlayerLoginMixin",
-		"RegistryBypassMixin",
+		"StatsCounterAccessor",
+        "PlayerListAccessor",
 		"MinecraftServerAccessor",
 		"ServerLevelAccessor",
 		"PlayerAccessor"

@@ -2,6 +2,7 @@ package com.frankloq.reset;
 
 public class WorldInjectionUtils {
     public static void wipePlayerState(net.minecraft.server.level.ServerPlayer player) {
+        player.closeContainer();
         player.setGameMode(net.minecraft.world.level.GameType.SURVIVAL);
 
         player.getInventory().clearContent();
@@ -17,8 +18,16 @@ public class WorldInjectionUtils {
         player.getFoodData().setFoodLevel(20);
         player.getFoodData().setSaturation(5.0f);
         player.removeAllEffects();
+        player.setHealth(player.getMaxHealth());
 
         player.clearFire();
+        player.setTicksFrozen(0);
+        player.setAirSupply(player.getMaxAirSupply());
+        player.fallDistance = 0;
+        player.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+        var stats = ((com.frankloq.mixin.StatsCounterAccessor) player.getStats()).hwr$stats();
+        for (var stat : new java.util.ArrayList<>(stats.keySet())) player.resetStat(stat);
+        player.getStats().sendStats(player);
 
         // Compatibility for Trinkets mod
         if (net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("trinkets")) {
@@ -48,7 +57,7 @@ public class WorldInjectionUtils {
                     }
                 }
             } catch (Exception e) {
-                com.frankloq.HardcoreWorldReset.LOGGER.error("not wiping allat", e);
+                com.frankloq.HardcoreWorldReset.LOGGER.error("Unable to clear optional Trinkets inventory", e);
             }
         }
     }

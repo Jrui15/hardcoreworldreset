@@ -50,7 +50,7 @@ public class WorldResetManager {
         if (!hasLoadedTryCount) {
             Path file = server.getWorldPath(LevelResource.ROOT).resolve("hardcore_state.txt");
             try {
-                currentTry = Files.exists(file) ? Integer.parseInt(Files.readString(file).trim()) : 1;
+                currentTry = Files.exists(file) ? Math.max(1, Integer.parseInt(Files.readString(file).trim())) : 1;
             } catch (IOException | NumberFormatException e) {
                 HardcoreWorldReset.LOGGER.warn("Unable to load attempt counter", e);
                 currentTry = 1;
@@ -79,10 +79,16 @@ public class WorldResetManager {
                 server.halt(false);
             }
         } else if (currentPhase == ResetPhase.DONE) {
-            HardcoreWorldReset.onResetComplete(server);
-            server.saveEverything(true, true, true);
-            currentPhase = ResetPhase.IDLE;
-            countdownLocked = false;
+            try {
+                HardcoreWorldReset.onResetComplete(server);
+                server.saveEverything(true, true, true);
+                Files.deleteIfExists(server.getWorldPath(LevelResource.ROOT).resolve("hardcore_reset_in_progress"));
+                currentPhase = ResetPhase.IDLE;
+                countdownLocked = false;
+            } catch (Exception e) {
+                HardcoreWorldReset.LOGGER.error("Player recovery failed; stopping the server", e);
+                server.halt(false);
+            }
         }
     }
     private static void rebuildWorlds(MinecraftServer server) throws IOException {
@@ -101,9 +107,16 @@ public class WorldResetManager {
         Path root = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
         for (var key : oldLevels.keySet()) {
             Path dimension = access.hwr$storage().getDimensionPath(key);
-            for (String folder : new String[]{"region", "entities", "poi", "data"}) validatePath(root, dimension.resolve(folder));
+            for (String folder : new String[]{"region", "entities", "poi", "data"}) validateTree(root, dimension.resolve(folder));
+        }
+        for (var resource : new LevelResource[]{LevelResource.PLAYER_ADVANCEMENTS_DIR,
+                LevelResource.PLAYER_STATS_DIR, LevelResource.PLAYER_DATA_DIR}) {
+            validateTree(root, server.getWorldPath(resource));
         }
         server.saveEverything(true, true, true);
+        Files.writeString(root.resolve("hardcore_reset_in_progress"),
+                "Reset interrupted. Restore a backup or inspect all dimensions before removing this file.",
+                java.nio.file.StandardOpenOption.CREATE_NEW);
         for (var level : oldLevels.values()) level.close();
         for (var key : oldLevels.keySet()) {
             Path dimension = access.hwr$storage().getDimensionPath(key);
@@ -115,6 +128,11 @@ public class WorldResetManager {
             deleteFolder(root, path);
             Files.createDirectories(path);
         }
+        // Discard offline caches so reconnecting players cannot resurrect old progress.
+        var playerList = server.getPlayerList();
+        var playerAccess = (com.frankloq.mixin.PlayerListAccessor) playerList;
+        playerAccess.hwr$stats().keySet().removeIf(id -> playerList.getPlayer(id) == null);
+        playerAccess.hwr$advancements().keySet().removeIf(id -> playerList.getPlayer(id) == null);
         WorldGenSettings previous = server.getWorldGenSettings();
         long seed = HardcoreWorldReset.reuseSeed ? previous.options().seed() : new java.util.Random().nextLong();
         WorldGenSettings settings = new WorldGenSettings(previous.options().withSeed(OptionalLong.of(seed)), previous.dimensions());
@@ -141,6 +159,13 @@ public class WorldResetManager {
         Files.writeString(root.resolve("hardcore_state.txt"), Integer.toString(currentTry));
         server.saveEverything(true, true, true);
         HardcoreWorldReset.LOGGER.info("Recreated vanilla dimensions with seed {} (attempt {})", seed, currentTry);
+    }
+    private static void validateTree(Path root, Path path) throws IOException {
+        validatePath(root, path);
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return;
+        try (var entries = Files.walk(path)) {
+            for (var entry : entries.toList()) validatePath(root, entry);
+        }
     }
     private static void validatePath(Path root, Path path) throws IOException {
         Path absolute = path.toAbsolutePath().normalize();

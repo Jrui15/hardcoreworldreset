@@ -36,11 +36,13 @@ public class HardcoreWorldReset implements ModInitializer {
 	private static boolean modEnabled = true;
 	public static boolean reuseSeed = false; // Reuse the same seed for each reset.
 	private static boolean scheduledResetActive = false; // Flag to indicate if a reset is currently scheduled
-	private static int scheduledResetTicks = -1; // scheduled reset
+	private static long scheduledResetTicks = -1; // scheduled reset
 	private static int initialScheduledMinutes = -1;// Store the initial minutes for accurate time remaining display
 	private static boolean alwaysShowActionBar = false;
 	private static int actionBarDisplayTicks = 0; // Tracks the 5-second popup
 	private static final java.util.Map<net.minecraft.server.level.ServerPlayer, Integer> rescueQueue = new java.util.HashMap<>();
+
+	private static final java.util.Map<java.util.UUID, GameType> previousModes = new java.util.HashMap<>();
 
 	public static boolean isModEnabled() { return modEnabled; }
 
@@ -48,11 +50,15 @@ public class HardcoreWorldReset implements ModInitializer {
 		boolean stopped = false;
 
 		// Stop death countdown
-		if (resetInProgress && limboCountdownTicks > 0) {
+		if (resetInProgress && !WorldResetManager.isResetting()) {
 			resetInProgress = false;
 			limboCountdownTicks = -1;
 			WorldResetManager.unlockCountdown();
-			stopped = true;
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                GameType mode = previousModes.remove(player.getUUID());
+                if (mode != null) player.setGameMode(mode);
+            }
+            stopped = true;
 		}
 
 		// Stop scheduled countdown
@@ -70,7 +76,15 @@ public class HardcoreWorldReset implements ModInitializer {
 	public void onInitialize() {
 		LOGGER.info("HardcoreWorldReset initialized.");
 		loadConfig();
+        ServerLifecycleEvents.SERVER_STARTING.register(server -> {
+            if (java.nio.file.Files.exists(server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT)
+                    .resolve("hardcore_reset_in_progress"))) {
+                throw new IllegalStateException("An interrupted world reset requires recovery; see docs/26.3-port.md");
+            }
+        });
 		ServerTickEvents.END_SERVER_TICK.register(this::onServerTick);
+
+		ServerLifecycleEvents.SERVER_STOPPING.register(HardcoreWorldReset::cancelCountdown);
 
 		ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
 			WorldResetManager.resetSession();
@@ -80,6 +94,9 @@ public class HardcoreWorldReset implements ModInitializer {
 			scheduledResetTicks = -1;
 			initialScheduledMinutes = -1;
 			rescueQueue.clear();
+            previousModes.clear();
+            modEnabled = true;
+            actionBarDisplayTicks = 0;
 		});
 
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
@@ -139,7 +156,7 @@ public class HardcoreWorldReset implements ModInitializer {
 										initialScheduledMinutes = mins;
 
 										// 20 ticks = 1 second. 60 seconds = 1 minute.
-										scheduledResetTicks = mins * 60 * 20;
+										scheduledResetTicks = mins * 60L * 20;
 										scheduledResetActive = true;
 										actionBarDisplayTicks = 100;
 
@@ -152,8 +169,8 @@ public class HardcoreWorldReset implements ModInitializer {
 					.then(literal("timeRemaining")
 							.executes(context -> {
 								if (scheduledResetActive) {
-									int secondsLeft = scheduledResetTicks / 20;
-									int mins = secondsLeft / 60;
+									long secondsLeft = scheduledResetTicks / 20;
+									long mins = secondsLeft / 60;
 									secondsLeft = secondsLeft % 60;
 									context.getSource().getServer().getPlayerList().broadcastSystemMessage(
 											Component.literal("§7Time until scheduled reset: §c" + mins + " §7minute(s) and §c" + secondsLeft + " §7second(s)."), false
@@ -207,8 +224,13 @@ public class HardcoreWorldReset implements ModInitializer {
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			net.minecraft.server.level.ServerPlayer player = handler.player;
 
-			// Check if the player logging in is trapped in Limbo
-			if (player.level().dimension() == com.frankloq.LimboDimension.LIMBO_KEY) {
+			GameType cancelledMode = previousModes.get(player.getUUID());
+            if (cancelledMode != null && !resetInProgress && !WorldResetManager.isResetting()) {
+                player.setGameMode(cancelledMode);
+                previousModes.remove(player.getUUID());
+            }
+            // Check if the player logging in is trapped in Limbo
+			if (player.level().dimension().equals(com.frankloq.LimboDimension.LIMBO_KEY)) {
 				// Give blindness so they don't see the void
 				player.addEffect(new net.minecraft.world.effect.MobEffectInstance(
 						net.minecraft.world.effect.MobEffects.BLINDNESS, 40, 1, false, false, false
@@ -233,7 +255,7 @@ public class HardcoreWorldReset implements ModInitializer {
 
 			// Only run checks once per second (every 20 ticks) to save performance
 			if ((scheduledResetTicks + 1) % 20 == 0) {
-				int secondsLeft = scheduledResetTicks / 20;
+				long secondsLeft = scheduledResetTicks / 20;
 
 				// Warnings
 				if (secondsLeft == 600) {
@@ -253,8 +275,8 @@ public class HardcoreWorldReset implements ModInitializer {
 				if (secondsLeft > 5) {
 					if (alwaysShowActionBar || actionBarDisplayTicks > 0) {
 						// Calculate minutes and remaining seconds for a clean 00:00 format
-						int displayMins = secondsLeft / 60;
-						int displaySecs = secondsLeft % 60;
+						long displayMins = secondsLeft / 60;
+						long displaySecs = secondsLeft % 60;
 						String timerText = String.format("§eReset in: %02d:%02d", displayMins, displaySecs);
 
 						// Send to every player's Action Bar (the 'true' makes it go above the hotbar)
@@ -293,18 +315,8 @@ public class HardcoreWorldReset implements ModInitializer {
 					if (!p.hasDisconnected()) {
 						ServerLevel overworld = server.getLevel(Level.OVERWORLD);
 						if (overworld != null) {
-							net.minecraft.core.BlockPos spawnPos = overworld.getRespawnData().pos();
 
-							// Wipe the player cache
-							com.frankloq.reset.WorldInjectionUtils.wipePlayerState(p);
-
-							// Teleport the player
-							p.teleportTo(
-									overworld,
-									spawnPos.getX() + 0.5,
-									spawnPos.getY() + 1.0,
-									spawnPos.getZ() + 0.5, java.util.Set.of(), 0.0f, 0.0f, true
-							);
+                            PlayerRespawner.respawnPlayer(server, p);
 
 							HardcoreWorldReset.LOGGER.info("Successfully rescued & wiped offline player: " + p.getName().getString());
 						}
@@ -352,18 +364,20 @@ public class HardcoreWorldReset implements ModInitializer {
 
 		// This happens for everyone who dies
 		// Restore health server-side
-		player.setHealth(20.0f);
+		player.setHealth(player.getMaxHealth());
 		player.getFoodData().setFoodLevel(20);
 		player.getFoodData().setSaturation(5.0f);
 
 		// Sync health to client
 		player.connection.send(
 				new ClientboundSetHealthPacket(
-						20.0f,
+						player.getHealth(),
 						player.getFoodData().getFoodLevel(),
 						player.getFoodData().getSaturationLevel()
 				)
 		);
+
+		previousModes.putIfAbsent(player.getUUID(), player.gameMode());
 
 		// Switch to spectator
 		player.setGameMode(GameType.SPECTATOR);
@@ -402,10 +416,19 @@ public class HardcoreWorldReset implements ModInitializer {
 	private static void executeLimboTeleport(MinecraftServer server) {
 		LOGGER.info("Teleporting all players to Limbo...");
 
-		int successCount = 0;
+		if (server.getLevel(LimboDimension.LIMBO_KEY) == null) {
+            LOGGER.error("Cannot reset: limbo dimension is unavailable");
+            cancelCountdown(server);
+            WorldResetManager.unlockCountdown();
+            return;
+        }
+        java.util.Map<ServerPlayer, GameType> teleportModes = new java.util.HashMap<>();
+        int successCount = 0;
 		int failCount = 0;
 
 		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            teleportModes.put(player, player.gameMode());
+            player.closeContainer();
 			player.setGameMode(GameType.SPECTATOR);
 			boolean success = LimboDimension.teleportToLimbo(player);
 
@@ -424,6 +447,15 @@ public class HardcoreWorldReset implements ModInitializer {
 				successCount, failCount);
 
 		if (failCount > 0) {
+            // Return everyone to a safe overworld spawn; no world has been erased.
+            for (ServerPlayer player : teleportModes.keySet()) {
+                var world = server.overworld();
+                var pos = world.getRespawnData().pos();
+                player.teleportTo(world, pos.getX() + 0.5, pos.getY() + 0.1, pos.getZ() + 0.5,
+                        java.util.Set.of(), 0, 0, true);
+                player.setGameMode(previousModes.getOrDefault(player.getUUID(), teleportModes.get(player)));
+            }
+            previousModes.clear();
 			WorldResetManager.unlockCountdown();
 			server.getPlayerList().broadcastSystemMessage(
 					Component.literal("§cFailed to teleport all players to Limbo. Check logs."),
@@ -469,6 +501,7 @@ public class HardcoreWorldReset implements ModInitializer {
 
 		// Respawn all players into the fresh world
 		PlayerRespawner.respawnAllPlayers(server);
+        previousModes.clear();
 
 		// Broadcasts the try counter
 		server.getPlayerList().broadcastSystemMessage(
@@ -479,7 +512,7 @@ public class HardcoreWorldReset implements ModInitializer {
 		// Restarting the timer
 		if (initialScheduledMinutes > 0) {
 			// Reset the clock to the maximum time
-			scheduledResetTicks = initialScheduledMinutes * 60 * 20;
+			scheduledResetTicks = initialScheduledMinutes * 60L * 20;
 			scheduledResetActive = true;
 
 			// Show the action bar for 5 seconds when the new loop starts
@@ -497,14 +530,15 @@ public class HardcoreWorldReset implements ModInitializer {
 		try {
 			// This gets the standard .minecraft/config folder
 			java.nio.file.Path configDir = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir();
-			java.nio.file.Path configFile = configDir.resolve("hardcoreworldreset.properties");
+			java.nio.file.Files.createDirectories(configDir);
+            java.nio.file.Path configFile = configDir.resolve("hardcoreworldreset.properties");
 			java.util.Properties props = new java.util.Properties();
 
 			if (java.nio.file.Files.exists(configFile)) {
 				// If config exists, read it
 				try (java.io.InputStream in = java.nio.file.Files.newInputStream(configFile)) {
 					props.load(in);
-					String reuse = props.getProperty("reuse-same-seed", "true");
+					String reuse = props.getProperty("reuse-same-seed", "false");
 					reuseSeed = Boolean.parseBoolean(reuse);
 					String showBar = props.getProperty("always-show-action-bar", "false");
 					alwaysShowActionBar = Boolean.parseBoolean(showBar);
@@ -527,7 +561,8 @@ public class HardcoreWorldReset implements ModInitializer {
 	public static void saveConfig() {
 		try {
 			java.nio.file.Path configDir = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir();
-			java.nio.file.Path configFile = configDir.resolve("hardcoreworldreset.properties");
+			java.nio.file.Files.createDirectories(configDir);
+            java.nio.file.Path configFile = configDir.resolve("hardcoreworldreset.properties");
 			java.util.Properties props = new java.util.Properties();
 
 			props.setProperty("reuse-same-seed", String.valueOf(reuseSeed));
